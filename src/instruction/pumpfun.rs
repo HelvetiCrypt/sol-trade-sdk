@@ -39,18 +39,22 @@ use solana_sdk::{
     signer::Signer,
 };
 
+/// Resolve the token program owning the pump mint.
+///
+/// Upstream forces Token-2022 for any mint whose address ends in `pump`, to guard against a
+/// stale parser/cache supplying a legacy Token Program id. That guess is wrong for the
+/// legacy-SPL mints Pump.fun issued before the Token-2022 cutover, which share the same vanity
+/// suffix: the ATA create ix is then assembled against a program that does not own the mint and
+/// the whole transaction reverts with `IncorrectProgramId`.
+///
+/// Callers that populate `token_program` from a fresh `getAccountInfo` owner (see
+/// `PumpFunParams::from_mint_by_rpc`) have an authoritative value, so honour it verbatim and
+/// fall back to Token-2022 only when it was never set.
 #[inline]
 pub(super) fn effective_pump_mint_token_program(
     protocol_params: &PumpFunParams,
-    mint: &Pubkey,
+    _mint: &Pubkey,
 ) -> Pubkey {
-    let mut encoded = [0_u8; 44];
-    let has_pump_suffix = bs58::encode(mint.as_ref())
-        .onto(&mut encoded[..])
-        .is_ok_and(|len| encoded[..len].ends_with(b"pump"));
-    if has_pump_suffix {
-        return TOKEN_PROGRAM_2022;
-    }
     let tp = protocol_params.token_program;
     if tp == Pubkey::default() {
         TOKEN_PROGRAM_2022
@@ -1584,21 +1588,30 @@ mod tests {
     }
 
     #[test]
-    fn pump_suffix_buy_forces_token_2022_even_with_explicit_legacy_token_program() {
+    fn pump_suffix_buy_respects_explicit_legacy_token_program() {
         crate::common::seed::set_default_rents();
         let params = swap_params_for_buy(pump_mint(), TOKEN_PROGRAM);
         let instructions = build_buy(&params).unwrap();
 
-        assert_eq!(instructions.len(), 2);
-        assert_eq!(instructions[1].accounts[8].pubkey, TOKEN_PROGRAM_2022);
-        assert_eq!(instructions[0].program_id, crate::constants::ASSOCIATED_TOKEN_PROGRAM_ID);
-        assert_eq!(instructions[0].accounts[5].pubkey, TOKEN_PROGRAM_2022);
-        assert_eq!(instructions[1].accounts.len(), 18);
-        assert_eq!(instructions[1].data.len(), 25);
+        assert_eq!(instructions.len(), 3);
+        assert_eq!(instructions[2].accounts[8].pubkey, TOKEN_PROGRAM);
+        assert_eq!(instructions[1].program_id, TOKEN_PROGRAM);
+        assert_eq!(instructions[2].accounts.len(), 18);
+        assert_eq!(instructions[2].data.len(), 25);
     }
 
     #[test]
-    fn pump_suffix_sell_forces_token_2022_even_with_explicit_legacy_token_program() {
+    fn pump_suffix_buy_defaults_to_token_2022_when_unset() {
+        crate::common::seed::set_default_rents();
+        let params = swap_params_for_buy(pump_mint(), Pubkey::default());
+        let instructions = build_buy(&params).unwrap();
+
+        assert_eq!(instructions[1].accounts[8].pubkey, TOKEN_PROGRAM_2022);
+        assert_eq!(instructions[0].accounts[5].pubkey, TOKEN_PROGRAM_2022);
+    }
+
+    #[test]
+    fn pump_suffix_sell_respects_explicit_legacy_token_program() {
         crate::common::seed::set_default_rents();
         let mut params = swap_params_for_buy(pump_mint(), TOKEN_PROGRAM);
         params.trade_type = crate::swqos::TradeType::Sell;
@@ -1609,7 +1622,7 @@ mod tests {
         let instructions = build_sell(&params).unwrap();
         let ix = instructions.last().unwrap();
 
-        assert_eq!(ix.accounts[9].pubkey, TOKEN_PROGRAM_2022);
+        assert_eq!(ix.accounts[9].pubkey, TOKEN_PROGRAM);
     }
 
     #[test]
@@ -1712,7 +1725,7 @@ mod tests {
 
     #[test]
     fn pumpfun_v2_explicit_wsol_input_with_output_ata_create_fits_without_dropping_priority() {
-        let mut params = swap_params_for_buy(pump_mint(), TOKEN_PROGRAM);
+        let mut params = swap_params_for_buy(pump_mint(), TOKEN_PROGRAM_2022);
         params.input_mint = crate::constants::WSOL_TOKEN_ACCOUNT;
         params.create_input_mint_ata = true;
         params.create_output_mint_ata = true;
